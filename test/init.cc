@@ -1550,12 +1550,18 @@ TEST(INIT_STRESS, concurrent_deinitialize_does_not_disturb_other_consumers) {
 	constexpr int kChurnIterations = 5000;
 
 	std::atomic<bool> stop_holder{false};
+	std::atomic<bool> holder_started{false};
+	std::atomic<bool> holder_initialized{false};
 
 	// Models a long lived consumer that keeps using cpuinfo for its whole lifetime
 	// If a concurrent deinitialize from another consumer (churn) frees the shared state
 	// then cpuinfo aborts the process, which fails the test
-	const auto holder = [&stop_holder]() {
-		cpuinfo_initialize();
+	const auto holder = [&]() {
+		holder_initialized.store(cpuinfo_initialize(), std::memory_order_relaxed);
+		holder_started.store(true, std::memory_order_release);
+		if (!holder_initialized.load(std::memory_order_relaxed)) {
+			return;
+		}
 		while (!stop_holder.load(std::memory_order_relaxed)) {
 			(void)cpuinfo_get_processors();
 			(void)cpuinfo_get_processor(0);
@@ -1570,6 +1576,14 @@ TEST(INIT_STRESS, concurrent_deinitialize_does_not_disturb_other_consumers) {
 	};
 
 	std::thread holder_thread(holder);
+	while (!holder_started.load(std::memory_order_acquire)) {
+		std::this_thread::yield();
+	}
+	if (!holder_initialized.load(std::memory_order_relaxed)) {
+		holder_thread.join();
+		FAIL() << "holder failed to initialize cpuinfo";
+	}
+
 	std::vector<std::thread> churn_threads;
 	churn_threads.reserve(kChurnThreads);
 	for (int t = 0; t < kChurnThreads; t++) {
@@ -1581,6 +1595,9 @@ TEST(INIT_STRESS, concurrent_deinitialize_does_not_disturb_other_consumers) {
 	stop_holder.store(true, std::memory_order_relaxed);
 	holder_thread.join();
 
-	// Reaching here without the process aborting means that lifecycle handling is correct
+	ASSERT_TRUE(cpuinfo_initialize());
+	EXPECT_NE(0, cpuinfo_get_processors_count());
+	EXPECT_TRUE(cpuinfo_get_processors());
+	cpuinfo_deinitialize();
 }
 #endif // CPUINFO_ENABLE_DEINIT
